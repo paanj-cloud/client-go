@@ -87,6 +87,7 @@ func (c *ClientWebSocketClient) listen() {
 			return
 		}
 
+		// First try to parse as generic event structure
 		var eventData struct {
 			Type string      `json:"type"`
 			Data interface{} `json:"data"`
@@ -96,12 +97,75 @@ func (c *ClientWebSocketClient) listen() {
 			continue
 		}
 
-		c.mu.Lock()
-		handlers := c.eventHandlers[eventData.Type]
-		c.mu.Unlock()
+		// Handle different message types like JS SDK
+		if eventData.Type == "message" {
+			// Server sends: {type: 'message', source: '...', message: '...', hash: '...', conversationID: '...', timestamp: ...}
+			// Parse the full message structure
+			var msgData map[string]interface{}
+			if err := json.Unmarshal(message, &msgData); err != nil {
+				continue
+			}
 
-		for _, handler := range handlers {
-			go handler(eventData.Data)
+			// Transform to match JS SDK format
+			transformedMsg := make(map[string]interface{})
+			for k, v := range msgData {
+				transformedMsg[k] = v
+			}
+
+			// Add aliases for convenience
+			if source, ok := msgData["source"]; ok {
+				transformedMsg["senderId"] = source
+			}
+			if convID, ok := msgData["conversationID"]; ok {
+				transformedMsg["conversationId"] = convID
+			}
+			if msg, ok := msgData["message"]; ok {
+				transformedMsg["content"] = msg
+			}
+
+			// Emit as message.create event
+			c.mu.Lock()
+			handlers := c.eventHandlers["message.create"]
+			c.mu.Unlock()
+
+			for _, handler := range handlers {
+				go handler(transformedMsg)
+			}
+
+			// Also emit conversation-specific event
+			if convID, ok := transformedMsg["conversationId"].(string); ok {
+				eventKey := fmt.Sprintf("conversation:%s:message.create", convID)
+				c.mu.Lock()
+				convHandlers := c.eventHandlers[eventKey]
+				c.mu.Unlock()
+
+				for _, handler := range convHandlers {
+					go handler(transformedMsg)
+				}
+			}
+		} else if eventData.Type == "event" {
+			// Handle standard event format
+			c.mu.Lock()
+			handlers := c.eventHandlers[eventData.Type]
+			c.mu.Unlock()
+
+			for _, handler := range handlers {
+				go handler(eventData.Data)
+			}
+		} else if eventData.Type == "subscribed" {
+			// Handle subscription confirmation
+			log.Printf("Subscribed to events")
+		} else if eventData.Type == "pong" {
+			// Handle pong
+		} else {
+			// Generic handler for other event types
+			c.mu.Lock()
+			handlers := c.eventHandlers[eventData.Type]
+			c.mu.Unlock()
+
+			for _, handler := range handlers {
+				go handler(eventData.Data)
+			}
 		}
 	}
 }
