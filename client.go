@@ -1,5 +1,7 @@
 package client
 
+// Test sync: 2026-02-04
+
 import (
 	"fmt"
 	"time"
